@@ -23,6 +23,7 @@ class TradingModule:
         Executes a copy trade based on a detected change in someone else's positions.
         """
         try:
+            print('trade change:',trade_change)
             side = trade_change['type'].lower() # 'buy' or 'sell'
             asset_id = trade_change['asset']
             original_size = float(trade_change['size'])
