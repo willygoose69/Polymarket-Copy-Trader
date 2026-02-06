@@ -51,14 +51,25 @@ async def main():
     logger.info(f"Initializing state for {len(wallets)} wallets...")
     wallet_tasks = {wallet: asyncio.create_task(fetch_positions_safe(wallet, True)) for wallet in wallets}
     results = []
-    with logging_redirect_tqdm():
-        with tqdm(total=len(wallet_tasks), desc="Initializing wallets") as pbar:
-            for coro in asyncio.as_completed(wallet_tasks.values()):
-                res = await coro
-                results.append(res)
-                pbar.update(1)
-    wallet_states = dict(zip(wallet_tasks.keys(), results))
-    wallet_states = {k: v for k, v in wallet_states.items() if v}
+    try:
+        with logging_redirect_tqdm():
+            with tqdm(total=len(wallet_tasks), desc="Initializing wallets") as pbar:
+                for coro in asyncio.as_completed(wallet_tasks.values()):
+                    res = await coro
+                    results.append(res)
+                    pbar.update(1)
+        wallet_states = dict(zip(wallet_tasks.keys(), results))
+        wallet_states = {k: v for k, v in wallet_states.items() if v}
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("Initialization interrupted...")
+        # Cancel all remaining initialization tasks
+        for task in wallet_tasks.values():
+            if not task.done():
+                task.cancel()
+        # Wait for all tasks to finish cancelling
+        if wallet_tasks.values():
+            await asyncio.gather(*wallet_tasks.values(), return_exceptions=True)
+        return
 
     logger.info("Starting copy trader loop...")
 
@@ -80,14 +91,26 @@ async def main():
             except Exception as e:
                 logger.error(f"Error tracking {wallet}: {e}")
             await asyncio.sleep(1)
-    while True:
-        try:
-            wallet_tasks = {}
+    
+    wallet_tasks = {}
+    try:
+        while True:
+            # Create tasks for any wallets not currently being monitored
             for wallet in wallets:
-                wallet_tasks[wallet] = check_on(wallet)
-            results = await asyncio.gather(*wallet_tasks.values())
-        except KeyboardInterrupt:
-            logger.info("Stopping...")
+                if wallet not in wallet_tasks or wallet_tasks[wallet].done():
+                    wallet_tasks[wallet] = asyncio.create_task(check_on(wallet))
+            
+            # Wait a bit before checking again
+            await asyncio.sleep(5)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("Stopping...")
+        # Cancel all remaining tasks
+        for task in wallet_tasks.values():
+            if not task.done():
+                task.cancel()
+        # Wait for all tasks to finish cancelling
+        if wallet_tasks.values():
+            await asyncio.gather(*wallet_tasks.values(), return_exceptions=True)
 
 
 if __name__ == "__main__":
