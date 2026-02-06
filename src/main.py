@@ -5,7 +5,8 @@ import logging
 import sys
 import os
 import asyncio
-from ratelimit import limits, sleep_and_retry
+from tqdm.contrib.logging import logging_redirect_tqdm
+from tqdm import tqdm
 
 # Ensure we can import from src
 sys.path.append(os.getcwd())
@@ -48,10 +49,14 @@ async def main():
     
     # Initialize state
     logger.info(f"Initializing state for {len(wallets)} wallets...")
-    wallet_tasks = {}
-    for wallet in wallets:
-        wallet_tasks[wallet] = fetch_positions_safe(wallet, True)
-    results = await asyncio.gather(*wallet_tasks.values())
+    wallet_tasks = {wallet: asyncio.create_task(fetch_positions_safe(wallet, True)) for wallet in wallets}
+    results = []
+    with logging_redirect_tqdm():
+        with tqdm(total=len(wallet_tasks), desc="Initializing wallets") as pbar:
+            for coro in asyncio.as_completed(wallet_tasks.values()):
+                res = await coro
+                results.append(res)
+                pbar.update(1)
     wallet_states = dict(zip(wallet_tasks.keys(), results))
     wallet_states = {k: v for k, v in wallet_states.items() if v}
 
