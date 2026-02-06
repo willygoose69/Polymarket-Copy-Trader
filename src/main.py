@@ -4,6 +4,7 @@ import json
 import logging
 import sys
 import os
+import asyncio
 from ratelimit import limits, sleep_and_retry
 
 # Ensure we can import from src
@@ -26,7 +27,7 @@ def load_config():
     with open(CONFIG_FILE, 'r') as f:
         return json.load(f)
 
-def main():
+async def main():
     config = load_config()
     wallets = config.get("wallets_to_track", [])
     rate_limit = config.get("rate_limit", 25)
@@ -37,29 +38,30 @@ def main():
 
     trading_module = TradingModule(config)
     
-    @sleep_and_retry
-    @limits(calls=rate_limit, period=10)
-    def fetch_positions_safe(wallet_address):
-        return get_user_positions(wallet_address)
+    async def fetch_positions_safe(wallet_address, initialize=False):
+        async with asyncio.Semaphore(rate_limit): 
+            positions = await asyncio.to_thread(get_user_positions, wallet_address)
+            await asyncio.sleep(1)
+            if positions and initialize:
+                logger.info(f"Initialized {wallet_address[:8]}... with {len(positions)} positions")
+            return positions
     
     # Initialize state
     logger.info(f"Initializing state for {len(wallets)} wallets...")
-    wallet_states = {}
+    wallet_tasks = {}
     for wallet in wallets:
-        positions = fetch_positions_safe(wallet)
-        if positions is not None:
-            wallet_states[wallet] = positions
-            logger.info(f"Initialized {wallet[:8]}... with {len(positions)} positions")
+        wallet_tasks[wallet] = fetch_positions_safe(wallet, True)
+    results = await asyncio.gather(*wallet_tasks.values())
+    wallet_states = dict(zip(wallet_tasks.keys(), results))
+    wallet_states = {k: v for k, v in wallet_states.items() if v}
 
     logger.info("Starting copy trader loop...")
-    try:
-        while True:
-            for wallet in wallets:
-                try:
-                    current_positions = fetch_positions_safe(wallet)
-                    if current_positions is None:
-                        continue
-                        
+
+    async def check_on(wallet):
+        async with asyncio.Semaphore(rate_limit):
+            try:
+                current_positions = await fetch_positions_safe(wallet)  
+                if current_positions:                  
                     previous_positions = wallet_states.get(wallet, [])
                     changes = detect_order_changes(previous_positions, current_positions)
                     
@@ -69,14 +71,19 @@ def main():
                             trading_module.execute_copy_trade(change)
                         
                     wallet_states[wallet] = current_positions
-                    
-                except Exception as e:
-                    logger.error(f"Error tracking {wallet}: {e}")
-            
-            time.sleep(1) # Check every second (rate limiter handles API constraint)
+                
+            except Exception as e:
+                logger.error(f"Error tracking {wallet}: {e}")
+            await asyncio.sleep(1)
+    while True:
+        try:
+            wallet_tasks = {}
+            for wallet in wallets:
+                wallet_tasks[wallet] = check_on(wallet)
+            results = await asyncio.gather(*wallet_tasks.values())
+        except KeyboardInterrupt:
+            logger.info("Stopping...")
 
-    except KeyboardInterrupt:
-        logger.info("Stopping...")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

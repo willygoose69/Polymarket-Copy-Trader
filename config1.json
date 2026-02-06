@@ -1,0 +1,12 @@
+{
+    "wallets_to_track": [
+        "0x777fae71d2ff9ec48a1213d48ba1d9d91024a1bb",
+        "0xf0ca28d5b0141f0a8e7b251dea80fd881cb166ed",
+        "0x491cace51f49a47d9f4bb21243b634f90c5f8c7e",
+        "0x584eee598b341109592b985c1a253ab044fa090f",
+        "0xeface9902242b0399856f981600b907dcc9bc9a1",
+        "0x97784b5c4f9fe917c1e67a96f480aac61faf1d7b"
+    ],
+    "copy_percentage": 0.1,
+    "trading_enabled": false
+}
