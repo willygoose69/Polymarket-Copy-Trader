@@ -101,7 +101,7 @@
     "0x5b9115312cb4fc2b2b57c65045e611092f222709",
     "0x2e4d05beafd81a6e85bc0c6a94820d61ef34f703"
   ],
-  "copy_percentage": 0.1,
+  "account_budget_dollars": 10,
   "trading_enabled": false,
   "rate_limit": 150
 }
