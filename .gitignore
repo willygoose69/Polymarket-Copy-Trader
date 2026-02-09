@@ -183,3 +183,4 @@ cython_debug/
 .env
 .DS_Store
 trades.csv
+state.json
