@@ -87,6 +87,7 @@ class TradingModule:
 
         except Exception as e:
             print(f"Failed to execute copy trade: {e}")
+            return None, None
 
     def check_orders(self):
         return self.client.get_trades()
