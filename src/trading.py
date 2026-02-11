@@ -23,8 +23,7 @@ class TradingModule:
             )
         else:
             self.simulator = TradingSimluator(config)
-
-        print("Connected.")
+        print("Connected.", self.poly.fetch_balance())
 
     def execute_copy_trade(self, trade_change: Dict[str, Any], multiplier: float, wallet: str):
         """
