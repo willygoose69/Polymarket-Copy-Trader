@@ -67,7 +67,7 @@ class TradingSimluator:
     def create_order(self, slug, outcome, side, amount, wallet, price):
         notes = []
         self.holdings.setdefault((slug, outcome), 0)
-        if side == "sell":
+        if side == "SELL":
             if self.holdings.get((slug, outcome)) < amount:
                 new_amount = self.holdings.get((slug,outcome), 0)
                 notes.append(f"Tried to sell {amount} shares, selling all ({new_amount}) shares instead.")
@@ -75,7 +75,7 @@ class TradingSimluator:
                 new_amount = amount
             self.holdings[(slug, outcome)] -= new_amount
             self.balance += (1-self.fee) * new_amount * price
-        if side == "buy":
+        if side == "BUY":
             total_cost = amount * price * (1+self.fee)
             if self.balance < total_cost:
                 notes.append(f"Tried to buy {amount} shares but we can't afford it.")
