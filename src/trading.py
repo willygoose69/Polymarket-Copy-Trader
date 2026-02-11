@@ -76,7 +76,11 @@ class TradingModule:
                     price = price * 0.99
                 # keep within allowed bounds
                 price = max(MIN_P, min(MAX_P, price))
-                price = round(price, 5)
+                if side == "SELL":
+                    price = round(price, 2)
+                else :
+                    price = round(price, 5)
+                    
                 print("tokenid, price, amount, side", token_id, price, our_size, side)
                 order = MarketOrderArgs(
                     token_id=token_id,
