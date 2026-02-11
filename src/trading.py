@@ -69,8 +69,10 @@ class TradingModule:
                 return None, None
             token_id, price = self.get_orderbook(slug, outcome, conditionId)
             if token_id:
-                if side == "BUY": price = round(price * 1.01, 2)
-                if side == "SELL": price = round(price * 0.99, 2)
+                if side == "BUY":
+                    price = round(price * 1.01, 5)
+                elif side == "SELL":
+                    price = round(price * 0.99, 5)
                 print("tokenid, price, amount, side", token_id, price, our_size, side)
                 order = MarketOrderArgs(
                     token_id=token_id,
