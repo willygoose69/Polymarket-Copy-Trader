@@ -8,7 +8,8 @@ import requests
 import json
 from simulator import TradingSimluator
 
-
+MIN_P = 0.001
+MAX_P = 0.999
 load_dotenv()
 
 class TradingModule:
@@ -50,7 +51,7 @@ class TradingModule:
             elif multiplier:
                 our_size = round(original_size*multiplier)
             
-            if our_size <= 0 or not price:
+            if our_size <= 0:
                 print(f"Skipping trade: calculated size {our_size} is too small.")
                 return None, None
 
@@ -70,9 +71,12 @@ class TradingModule:
             token_id, price = self.get_orderbook(slug, outcome, conditionId)
             if token_id:
                 if side == "BUY":
-                    price = round(price * 1.01, 5)
+                    price = price * 1.01
                 elif side == "SELL":
-                    price = round(price * 0.99, 5)
+                    price = price * 0.99
+                # keep within allowed bounds
+                price = max(MIN_P, min(MAX_P, price))
+                price = round(price, 5)
                 print("tokenid, price, amount, side", token_id, price, our_size, side)
                 order = MarketOrderArgs(
                     token_id=token_id,
