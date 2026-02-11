@@ -93,9 +93,8 @@ async def main():
                         else:
                             multiplier = account_budget / total_initial_value
                             for change in changes:
-                                logger.info(f"Detected change for {wallet[:8]}: {change['type']} {change['size']} shares of {change.get('title')}")
-                                order_id = trading_module.execute_copy_trade(change, multiplier, wallet)
-                                if order_id: logger.log(f"Success! Order ID: {order_id}")
+                                success, order_id = trading_module.execute_copy_trade(change, multiplier, wallet)
+                                if success: logger.info(f"Success! Order ID: {order_id}")
                     else:
                         logger.debug("No changes found")
                     wallet_states[wallet] = current_positions

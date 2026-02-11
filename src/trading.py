@@ -42,9 +42,7 @@ class TradingModule:
             slug = trade_change.get('slug')
             price = trade_change['price']
             outcome = trade_change["outcome"]
-            asset = trade_change["asset"]
             conditionId = trade_change["conditionId"]
-            print("slug outcome asset conditionId", slug, outcome, asset, conditionId)
 
             if self.copy_percentage:
                 # Calculate our size based on the percentage config
@@ -52,14 +50,14 @@ class TradingModule:
             elif multiplier:
                 our_size = round(original_size*multiplier)
             
-            if our_size <= 0 or not trade_change['price']:
+            if our_size <= 0 or not price:
                 print(f"Skipping trade: calculated size {our_size} is too small.")
-                return
+                return None, None
 
 
-            print(f"Copying {side} for {slug}: {trade_change['type']} {our_size} shares @ ${trade_change['price']}")
             # Add this data to CSV
             if not self.trading_enabled:
+                print(f"Copying {side} for {slug}: {trade_change['type']} {our_size} shares @ ${trade_change['price']}")
                 self.simulator.create_order(
                     slug=slug,
                     outcome=outcome,
@@ -68,10 +66,12 @@ class TradingModule:
                     wallet=wallet,
                     price=price
                 )
-                return
-            token_id = self.get_orderbook(slug, outcome, conditionId)
+                return None, None
+            token_id, price = self.get_orderbook(slug, outcome, conditionId)
             if token_id:
-                print("token, price, amount, side", token_id, float(price), float(our_size), side)
+                if side == "BUY": price = round(price * 1.01, 2)
+                if side == "SELL": price = round(price * 0.99, 2)
+                print("tokenid, price, amount, side", token_id, price, our_size, side)
                 order = MarketOrderArgs(
                     token_id=token_id,
                     price=float(price),
@@ -81,9 +81,9 @@ class TradingModule:
                 signed = self.client.create_market_order(order)
                 resp = self.client.post_order(signed)
                 order_id = resp["orderID"]
-                return order_id
+                return True, order_id
             print(f"Skipping trade: {slug} not open.")
-            return (False, slug)
+            return False, slug
 
         except Exception as e:
             print(f"Failed to execute copy trade: {e}")
@@ -110,29 +110,23 @@ class TradingModule:
                 market = m
                 # Skip markets that cannot accept orders
                 if market.get("acceptingOrders") is False or market.get("closed") is True:
-                    return None
+                    return None, None
                 break
         if market is None:
-            return None
+            return None, None
 
 
         outcomes = market["outcomes"]
         clob_ids = market["clobTokenIds"]
+        prices = market["outcomePrices"]
+
         if isinstance(outcomes, str): outcomes = json.loads(outcomes)
         if isinstance(clob_ids, str): clob_ids = json.loads(clob_ids)
+        if isinstance(prices, str): prices = json.loads(prices)
+
+        price_map = {o.lower(): float(p) for o, p in zip(outcomes, prices)}
 
         idx = [o.lower() for o in outcomes].index(outcome.lower())
         token_id = clob_ids[idx]
-
-        outcomes = market["outcomes"]
-        clob_ids = market["clobTokenIds"]
-        # sometimes Gamma returns strings instead of lists
-        if isinstance(outcomes, str):
-            outcomes = json.loads(outcomes)
-        if isinstance(clob_ids, str):
-            clob_ids = json.loads(clob_ids)
-
-        # 2. map outcome → token id
-        idx = [o.lower() for o in outcomes].index(outcome.lower())
-        token_id = clob_ids[idx]
-        return token_id
+        selected_price = price_map[outcome.lower()]
+        return token_id, selected_price
