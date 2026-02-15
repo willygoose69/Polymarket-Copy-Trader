@@ -181,3 +181,6 @@ cython_debug/
 .cursorindexingignore
 
 .env
+.DS_Store
+trades.csv
+state.json

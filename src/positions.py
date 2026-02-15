@@ -44,7 +44,7 @@ def detect_order_changes(
                 'title': p_tn_plus_1.get('title'),
                 'outcome': p_tn_plus_1.get('outcome'),
                 'conditionId': p_tn_plus_1.get('conditionId'),
-                'slug': p_tn_plus_1.get('slug')
+                'slug': p_tn_plus_1.get('slug'),
             })
         
         # Position Completely Sold (Sell)

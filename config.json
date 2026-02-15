@@ -1,7 +1,8 @@
 {
-    "wallets_to_track": [
-        "0x63ce342161250d705dc0b16df89036c8e5f9ba9a"
-    ],
-    "copy_percentage": 1.0,
-    "trading_enabled": true
+  "wallets_to_track": [
+    "0xf247584e41117bbBe4Cc06E4d2C95741792a5216"
+  ],
+  "copy_percentage": 1,
+  "trading_enabled": true,
+  "rate_limit": 150
 }

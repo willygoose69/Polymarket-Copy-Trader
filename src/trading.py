@@ -1,67 +1,143 @@
 import os
-import pmxt
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import MarketOrderArgs
+from py_clob_client.order_builder.constants import BUY, SELL
 from dotenv import load_dotenv
 from typing import Dict, Any
+import requests
+import json
+from simulator import TradingSimluator
 
+MIN_P = 0.001
+MAX_P = 0.999
 load_dotenv()
 
 class TradingModule:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.copy_percentage = config.get("copy_percentage", 1.0)
+        self.copy_percentage = config.get("copy_percentage", 0)
+        self.trading_enabled = config.get("trading_enabled", False)
         
-        print("Connecting to Polymarket...")
-        self.poly = pmxt.Polymarket(
-            private_key=os.getenv("POLYMARKET_PRIVATE_KEY"),
-            proxy_address=os.getenv("POLYMARKET_PROXY_ADDRESS"),
-            signature_type=2
-        )
-        print("Connected.")
+        if self.trading_enabled:
+            print("Connecting to Polymarket...")
+            self.client = ClobClient(
+                "https://clob.polymarket.com",
+                key=os.getenv("POLYMARKET_PRIVATE_KEY"),
+                funder=os.getenv("POLYMARKET_FUNDER_ADDRESS"),
+                chain_id=137,
+                signature_type=1
+            )
+            creds = self.client.create_or_derive_api_creds()
+            self.client.set_api_creds(creds)
+            print("Connected.")
+        else:
+            self.simulator = TradingSimluator(config)
 
-    def execute_copy_trade(self, trade_change: Dict[str, Any]):
+    def execute_copy_trade(self, trade_change: Dict[str, Any], multiplier: float, wallet: str):
         """
         Executes a copy trade based on a detected change in someone else's positions.
         """
         try:
-            side = trade_change['type'].lower() # 'buy' or 'sell'
-            asset_id = trade_change['asset']
+            side = trade_change['type'].upper() # 'buy' or 'sell'
             original_size = float(trade_change['size'])
             slug = trade_change.get('slug')
-            
-            # Calculate our size based on the percentage config
-            our_size = round(original_size * self.copy_percentage, 2)
+            price = trade_change['price']
+            outcome = trade_change["outcome"]
+            conditionId = trade_change["conditionId"]
+
+            if self.copy_percentage:
+                # Calculate our size based on the percentage config
+                our_size = round(original_size * self.copy_percentage, 2)
+            elif multiplier:
+                our_size = round(original_size*multiplier)
             
             if our_size <= 0:
                 print(f"Skipping trade: calculated size {our_size} is too small.")
-                return
+                return None, None
 
-            # Find market ID from slug if not provided (though asset_id/outcome_id is what's needed for order)
-            # The positions API gives us the asset (outcome_id). 
-            # We still need the market_id for the pmxt create_order call.
-            
-            markets = self.poly.fetch_markets(slug=slug)
-            if not markets:
-                print(f"Market not found for slug: {slug}")
-                return
-            market_id = markets[0].market_id
 
-            print(f"Copying {side} for {slug}: {our_size} shares")
-            
-            if not self.config.get("trading_enabled", False):
-                print("Trading disabled in config. Dry run only.")
-                return
-
-            order = self.poly.create_order(
-                market_id=market_id,
-                outcome_id=asset_id,
-                side=side,
-                type="market",
-                amount=our_size,
-                fee=1000
-            )
-            
-            print(f"Success! Order ID: {order.order_id}")
-            return order
+            # Add this data to CSV
+            if not self.trading_enabled:
+                print(f"Copying {side} for {slug}: {trade_change['type']} {our_size} shares @ ${trade_change['price']}")
+                self.simulator.create_order(
+                    slug=slug,
+                    outcome=outcome,
+                    side=side,
+                    amount=our_size,
+                    wallet=wallet,
+                    price=price
+                )
+                return None, None
+            token_id, price = self.get_orderbook(slug, outcome, conditionId)
+            if token_id:
+                if side == "BUY":
+                    price = price * 1.01
+                elif side == "SELL":
+                    price = price * 0.99
+                # keep within allowed bounds
+                price = max(MIN_P, min(MAX_P, price))
+                if side == "SELL":
+                    price = round(price, 2)
+                else :
+                    price = round(price, 4)
+                    
+                print("tokenid, price, amount, side", token_id, price, our_size, side)
+                order = MarketOrderArgs(
+                    token_id=token_id,
+                    price=float(price),
+                    amount=float(our_size),
+                    side=side
+                )
+                signed = self.client.create_market_order(order)
+                resp = self.client.post_order(signed)
+                order_id = resp["orderID"]
+                return True, order_id
+            print(f"Skipping trade: {slug} not open.")
+            return False, slug
 
         except Exception as e:
             print(f"Failed to execute copy trade: {e}")
+            return None, None
+
+    def check_orders(self):
+        return self.client.get_trades()
+
+    def get_orderbook(self, slug, outcome, condition_id):
+        # 1. fetch market from Gamma
+        r = requests.get(
+            "https://gamma-api.polymarket.com/markets",
+            params={"slug": slug, "conditionId": condition_id},
+            timeout=10
+        )
+        r.raise_for_status()
+        markets = r.json()
+        if not markets:
+            raise Exception("No market found")
+
+        # prefer exact conditionId match
+        market = None
+        for m in markets:
+            if str(m.get("conditionId", "")).lower() == condition_id.lower():
+                market = m
+                # Skip markets that cannot accept orders
+                if market.get("acceptingOrders") is False or market.get("closed") is True:
+                    return None, None
+                break
+        if market is None:
+            return None, None
+
+
+        outcomes = market["outcomes"]
+        clob_ids = market["clobTokenIds"]
+        prices = market["outcomePrices"]
+
+        if isinstance(outcomes, str): outcomes = json.loads(outcomes)
+        if isinstance(clob_ids, str): clob_ids = json.loads(clob_ids)
+        if isinstance(prices, str): prices = json.loads(prices)
+
+        price_map = {o.lower(): float(p) for o, p in zip(outcomes, prices)}
+
+        idx = [o.lower() for o in outcomes].index(outcome.lower())
+        token_id = clob_ids[idx]
+        selected_price = price_map[outcome.lower()]
+        return token_id, selected_price
