@@ -1,7 +1,7 @@
 import os
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import MarketOrderArgs
-from py_clob_client.order_builder.constants import BUY, SELL
+from py_clob_client.clob_types import OrderArgs
+from decimal import Decimal, ROUND_DOWN
 from dotenv import load_dotenv
 from typing import Dict, Any
 import requests
@@ -15,7 +15,7 @@ load_dotenv()
 class TradingModule:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.copy_percentage = config.get("copy_percentage", 0)
+        self.copy_percentage = Decimal(str(config.get("copy_percentage", 0)))
         self.trading_enabled = config.get("trading_enabled", False)
         
         if self.trading_enabled:
@@ -34,31 +34,26 @@ class TradingModule:
             self.simulator = TradingSimluator(config)
 
     def execute_copy_trade(self, trade_change: Dict[str, Any], multiplier: float, wallet: str):
-        """
-        Executes a copy trade based on a detected change in someone else's positions.
-        """
         try:
-            side = trade_change['type'].upper() # 'buy' or 'sell'
-            original_size = float(trade_change['size'])
+            side = trade_change['type'].upper()
+            original_size = Decimal(str(trade_change['size']))
             slug = trade_change.get('slug')
-            price = trade_change['price']
             outcome = trade_change["outcome"]
             conditionId = trade_change["conditionId"]
 
             if self.copy_percentage:
-                # Calculate our size based on the percentage config
-                our_size = round(original_size * self.copy_percentage, 2)
+                our_size = original_size * self.copy_percentage
             elif multiplier:
-                our_size = round(original_size*multiplier)
-            
+                our_size = original_size * Decimal(str(multiplier))
+            else:
+                return None, None
+
             if our_size <= 0:
                 print(f"Skipping trade: calculated size {our_size} is too small.")
                 return None, None
 
-
-            # Add this data to CSV
             if not self.trading_enabled:
-                print(f"Copying {side} for {slug}: {trade_change['type']} {our_size} shares @ ${trade_change['price']}")
+                price = Decimal(str(trade_change['price']))
                 self.simulator.create_order(
                     slug=slug,
                     outcome=outcome,
@@ -68,36 +63,47 @@ class TradingModule:
                     price=price
                 )
                 return None, None
+
             token_id, price = self.get_orderbook(slug, outcome, conditionId)
-            if token_id:
-                if side == "BUY":
-                    price = price * 1.01
-                elif side == "SELL":
-                    price = price * 0.99
-                # keep within allowed bounds
-                price = max(MIN_P, min(MAX_P, price))
-                if side == "SELL":
-                    price = round(price, 2)
-                else :
-                    price = round(price, 4)
-                    
-                print("tokenid, price, amount, side", token_id, price, our_size, side)
-                order = MarketOrderArgs(
-                    token_id=token_id,
-                    price=float(price),
-                    amount=float(our_size),
-                    side=side
-                )
-                signed = self.client.create_market_order(order)
-                resp = self.client.post_order(signed)
-                order_id = resp["orderID"]
-                return True, order_id
-            print(f"Skipping trade: {slug} not open.")
-            return False, slug
+            if not token_id:
+                print(f"Skipping trade: {slug} not open.")
+                return False, slug
+
+            price = Decimal(str(price))
+
+            # quantize helpers
+            def q(x, step):
+                return (x / step).to_integral_value(rounding=ROUND_DOWN) * step
+
+            # shares must always be 4dp
+            maker_shares = q(our_size, Decimal("0.0001"))
+
+            # make price aggressively marketable
+            if side == "BUY":
+                market_price = q(price + Decimal("0.01"), Decimal("0.001"))
+            else:
+                market_price = q(price - Decimal("0.01"), Decimal("0.001"))
+
+            print("tokenid, price, size, side", token_id, market_price, maker_shares, side)
+
+            order_args = OrderArgs(
+                token_id=token_id,
+                side=side,
+                price=float(market_price),
+                size=float(maker_shares),
+            )
+
+            signed = self.client.create_order(order_args)
+
+            resp = self.client.post_order(signed, "FAK")
+
+            order_id = resp["orderID"]
+            return True, order_id
 
         except Exception as e:
             print(f"Failed to execute copy trade: {e}")
             return None, None
+
 
     def check_orders(self):
         return self.client.get_trades()
@@ -135,9 +141,9 @@ class TradingModule:
         if isinstance(clob_ids, str): clob_ids = json.loads(clob_ids)
         if isinstance(prices, str): prices = json.loads(prices)
 
-        price_map = {o.lower(): float(p) for o, p in zip(outcomes, prices)}
+        #price_map = {o.lower(): float(p) for o, p in zip(outcomes, prices)}
 
         idx = [o.lower() for o in outcomes].index(outcome.lower())
         token_id = clob_ids[idx]
-        selected_price = price_map[outcome.lower()]
+        selected_price = Decimal(str(prices[idx]))
         return token_id, selected_price
