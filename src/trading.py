@@ -1,5 +1,6 @@
 import os
 from py_clob_client.client import ClobClient
+from py_clob_client.exceptions import PolyApiException
 from py_clob_client.clob_types import OrderArgs
 from decimal import Decimal, ROUND_DOWN
 from dotenv import load_dotenv
@@ -75,14 +76,37 @@ class TradingModule:
             def q(x, step):
                 return (x / step).to_integral_value(rounding=ROUND_DOWN) * step
 
+
             # shares must always be 4dp
             maker_shares = q(our_size, Decimal("0.0001"))
 
             # make price aggressively marketable
             if side == "BUY":
                 market_price = q(price + Decimal("0.01"), Decimal("0.001"))
+                desired_shares = q(our_size, Decimal("0.0001"))
+                usdc = q(desired_shares * market_price, Decimal("0.01"))
+                shares = q(usdc / market_price, Decimal("0.00001"))
+
+                print("BUY price:", market_price, "usdc(2dp):", usdc, "shares(5dp):", shares)
+
+                order_args = OrderArgs(
+                    token_id=token_id,
+                    side="BUY",
+                    price=float(market_price),
+                    size=float(usdc),   # <-- USDC (2 decimals)
+                )
             else:
                 market_price = q(price - Decimal("0.01"), Decimal("0.001"))
+                shares = q(our_size, Decimal("0.0001"))
+
+                print("SELL price:", market_price, "shares(4dp):", shares)
+
+                order_args = OrderArgs(
+                    token_id=token_id,
+                    side="SELL",
+                    price=float(market_price),
+                    size=float(shares),  # <-- shares for SELL
+                )
 
             print("tokenid, price, size, side", token_id, market_price, maker_shares, side)
 
@@ -94,8 +118,11 @@ class TradingModule:
             )
 
             signed = self.client.create_order(order_args)
-
-            resp = self.client.post_order(signed, "FAK")
+            try:
+                resp = self.client.post_order(signed, "FAK")
+            except PolyApiException as e:
+                print(f"Order failed: {e}")
+                return None, None   
 
             order_id = resp["orderID"]
             return True, order_id
