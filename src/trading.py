@@ -79,7 +79,7 @@ class TradingModule:
                 if side == "SELL":
                     price = round(price, 2)
                 else :
-                    price = round(price, 5)
+                    price = round(price, 4)
                     
                 print("tokenid, price, amount, side", token_id, price, our_size, side)
                 order = MarketOrderArgs(

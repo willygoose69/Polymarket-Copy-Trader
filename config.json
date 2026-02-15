@@ -1,12 +1,8 @@
 {
   "wallets_to_track": [
-    "0xf2f6af4f27ec2dcf4072095ab804016e14cd5817",
-    "0x69ea0d77ef34f1acb03aaed901df7620fc4215cd",
-    "0xf4e92e9d6549eb51cc1eaa792f3f5614a1eea5af",
-    "0x17db3fcd93ba12d38382a0cade24b200185c5f6d",
-    "0x9d84ce0306f8551e02efef1680475fc0f1dc1344"
+    "0xf247584e41117bbBe4Cc06E4d2C95741792a5216"
   ],
-  "account_budget_dollars": 20,
+  "copy_percentage": 1,
   "trading_enabled": true,
   "rate_limit": 150
 }
