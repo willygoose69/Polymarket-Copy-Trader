@@ -1,24 +1,45 @@
 import os
+import json
+import requests
+from decimal import Decimal, ROUND_DOWN
+from typing import Dict, Any, Optional, Tuple
+
+from dotenv import load_dotenv
 from py_clob_client.client import ClobClient
 from py_clob_client.exceptions import PolyApiException
-from py_clob_client.clob_types import OrderArgs
-from decimal import Decimal, ROUND_DOWN
-from dotenv import load_dotenv
-from typing import Dict, Any
-import requests
-import json
-from simulator import TradingSimluator
+from py_clob_client.clob_types import (
+    OrderArgs,
+    MarketOrderArgs,
+    OrderType,
+    BalanceAllowanceParams,
+    AssetType,
+)
 
-MIN_P = 0.001
-MAX_P = 0.999
+from simulator import TradingSimluator  # keep your original spelling
+
 load_dotenv()
+
+MIN_P = Decimal("0.001")
+MAX_P = Decimal("0.999")
+
+USDC_STEP = Decimal("0.01")     # BUY market amount precision: 2dp
+SHARES_STEP = Decimal("0.0001") # SELL shares precision: 4dp (and taker constraint)
+
+
+def q_step(x: Decimal, step: Decimal) -> Decimal:
+    return (x / step).to_integral_value(rounding=ROUND_DOWN) * step
+
+
+def clamp(x: Decimal, lo: Decimal, hi: Decimal) -> Decimal:
+    return max(lo, min(hi, x))
+
 
 class TradingModule:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.copy_percentage = Decimal(str(config.get("copy_percentage", 0)))
-        self.trading_enabled = config.get("trading_enabled", False)
-        
+        self.trading_enabled = bool(config.get("trading_enabled", False))
+
         if self.trading_enabled:
             print("Connecting to Polymarket...")
             self.client = ClobClient(
@@ -26,7 +47,7 @@ class TradingModule:
                 key=os.getenv("POLYMARKET_PRIVATE_KEY"),
                 funder=os.getenv("POLYMARKET_FUNDER_ADDRESS"),
                 chain_id=137,
-                signature_type=1
+                signature_type=1,
             )
             creds = self.client.create_or_derive_api_creds()
             self.client.set_api_creds(creds)
@@ -34,131 +55,53 @@ class TradingModule:
         else:
             self.simulator = TradingSimluator(config)
 
-    def execute_copy_trade(self, trade_change: Dict[str, Any], multiplier: float, wallet: str):
-        try:
-            side = trade_change['type'].upper()
-            original_size = Decimal(str(trade_change['size']))
-            slug = trade_change.get('slug')
-            outcome = trade_change["outcome"]
-            conditionId = trade_change["conditionId"]
+    # ---------- CLOB helpers ----------
+    def get_tick_size(self, token_id: str) -> Decimal:
+        r = requests.get(
+            "https://clob.polymarket.com/tick-size",
+            params={"token_id": token_id},
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        tick = data.get("minimum_tick_size")
+        if tick is None:
+            raise ValueError(f"Could not read tick size from response: {data}")
+        return Decimal(str(tick))
 
-            if self.copy_percentage:
-                our_size = original_size * self.copy_percentage
-            elif multiplier:
-                our_size = original_size * Decimal(str(multiplier))
-            else:
-                return None, None
+    def get_available_balance(self, token_id: str, side: str) -> Decimal:
+        side = side.upper()
+        if side == "BUY":
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        elif side == "SELL":
+            params = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+        else:
+            raise ValueError("side must be BUY or SELL")
 
-            if our_size <= 0:
-                print(f"Skipping trade: calculated size {our_size} is too small.")
-                return None, None
+        self.client.update_balance_allowance(params)
+        bal = self.client.get_balance_allowance(params)
+        return Decimal(str(bal["balance"]))
 
-            if not self.trading_enabled:
-                price = Decimal(str(trade_change['price']))
-                self.simulator.create_order(
-                    slug=slug,
-                    outcome=outcome,
-                    side=side,
-                    amount=our_size,
-                    wallet=wallet,
-                    price=price
-                )
-                return None, None
-
-            token_id, price = self.get_orderbook(slug, outcome, conditionId)
-            if not token_id:
-                print(f"Skipping trade: {slug} not open.")
-                return False, slug
-
-            price = Decimal(str(price))
-
-            # quantize helpers
-            def q(x, step):
-                return (x / step).to_integral_value(rounding=ROUND_DOWN) * step
-
-
-            # shares must always be 4dp
-            maker_shares = q(our_size, Decimal("0.0001"))
-
-            # make price aggressively marketable
-            if side == "BUY":
-                market_price = q(price + Decimal("0.01"), Decimal("0.001"))
-                desired_shares = q(our_size, Decimal("0.0001"))
-                usdc = q(desired_shares * market_price, Decimal("0.01"))
-                shares = q(usdc / market_price, Decimal("0.00001"))
-
-                print("BUY price:", market_price, "usdc(2dp):", usdc, "shares(5dp):", shares)
-
-                order_args = OrderArgs(
-                    token_id=token_id,
-                    side="BUY",
-                    price=float(market_price),
-                    size=float(usdc),   # <-- USDC (2 decimals)
-                )
-            else:
-                market_price = q(price - Decimal("0.01"), Decimal("0.001"))
-                shares = q(our_size, Decimal("0.0001"))
-
-                print("SELL price:", market_price, "shares(4dp):", shares)
-
-                order_args = OrderArgs(
-                    token_id=token_id,
-                    side="SELL",
-                    price=float(market_price),
-                    size=float(shares),  # <-- shares for SELL
-                )
-
-            print("tokenid, price, size, side", token_id, market_price, maker_shares, side)
-
-            order_args = OrderArgs(
-                token_id=token_id,
-                side=side,
-                price=float(market_price),
-                size=float(maker_shares),
-            )
-
-            signed = self.client.create_order(order_args)
-            try:
-                resp = self.client.post_order(signed, "FAK")
-            except PolyApiException as e:
-                print(f"Order failed: {e}")
-                return None, None   
-
-            order_id = resp["orderID"]
-            return True, order_id
-
-        except Exception as e:
-            print(f"Failed to execute copy trade: {e}")
-            return None, None
-
-
-    def check_orders(self):
-        return self.client.get_trades()
-
-    def get_orderbook(self, slug, outcome, condition_id):
-        # 1. fetch market from Gamma
+    def get_orderbook(self, slug: str, outcome: str, condition_id: str) -> Tuple[Optional[str], Optional[Decimal]]:
         r = requests.get(
             "https://gamma-api.polymarket.com/markets",
             params={"slug": slug, "conditionId": condition_id},
-            timeout=10
+            timeout=10,
         )
         r.raise_for_status()
         markets = r.json()
         if not markets:
             raise Exception("No market found")
 
-        # prefer exact conditionId match
         market = None
         for m in markets:
             if str(m.get("conditionId", "")).lower() == condition_id.lower():
                 market = m
-                # Skip markets that cannot accept orders
                 if market.get("acceptingOrders") is False or market.get("closed") is True:
                     return None, None
                 break
         if market is None:
             return None, None
-
 
         outcomes = market["outcomes"]
         clob_ids = market["clobTokenIds"]
@@ -168,9 +111,138 @@ class TradingModule:
         if isinstance(clob_ids, str): clob_ids = json.loads(clob_ids)
         if isinstance(prices, str): prices = json.loads(prices)
 
-        #price_map = {o.lower(): float(p) for o, p in zip(outcomes, prices)}
-
         idx = [o.lower() for o in outcomes].index(outcome.lower())
-        token_id = clob_ids[idx]
+        token_id = str(clob_ids[idx])
         selected_price = Decimal(str(prices[idx]))
         return token_id, selected_price
+
+    # ---------- Main ----------
+    def execute_copy_trade(self, trade_change: Dict[str, Any], multiplier: float, wallet: str):
+        """
+        - We treat sizing internally as SHARES.
+        - For market orders:
+            BUY  -> amount is USDC (2dp)
+            SELL -> amount is SHARES (4dp)
+        """
+        try:
+            side = trade_change["type"].upper()
+            if side not in ("BUY", "SELL"):
+                print(f"Skipping trade: unsupported side '{side}'")
+                return None, None
+
+            original_size = Decimal(str(trade_change["size"]))
+            our_size = Decimal(str(trade_change.get("actual_size", "0")))  # SHARES
+            slug = trade_change.get("slug")
+            outcome = trade_change["outcome"]
+            condition_id = trade_change["conditionId"]
+
+            # determine desired shares
+            if our_size <= 0:
+                if self.copy_percentage and self.copy_percentage > 0:
+                    our_size = original_size * self.copy_percentage
+                elif multiplier:
+                    our_size = original_size * Decimal(str(multiplier))
+                else:
+                    return None, None
+
+            desired_shares = q_step(our_size, SHARES_STEP)
+            if desired_shares <= 0:
+                print(f"Skipping trade: calculated size {desired_shares} is too small.")
+                return None, None
+
+            # simulator
+            if not self.trading_enabled:
+                price = Decimal(str(trade_change["price"]))
+                self.simulator.create_order(
+                    slug=slug,
+                    outcome=outcome,
+                    side=side,
+                    amount=desired_shares,
+                    wallet=wallet,
+                    price=price,
+                )
+                return None, None
+
+            token_id, ref_price = self.get_orderbook(slug, outcome, condition_id)
+            if not token_id or ref_price is None:
+                print(f"Skipping trade: {slug} not open.")
+                return False, slug
+
+            tick = self.get_tick_size(token_id)
+
+            # marketable price limit
+            raw_price = (ref_price + Decimal("0.01")) if side == "BUY" else (ref_price - Decimal("0.01"))
+            price_limit = q_step(clamp(raw_price, MIN_P, MAX_P), tick)
+
+            # --- MARKET ORDER (FAK) ---
+            # FAK is defined as: BUY in dollars, SELL in shares. :contentReference[oaicite:2]{index=2}
+            if side == "BUY":
+                usdc_amount = q_step(desired_shares * price_limit, USDC_STEP)
+
+                print("BUY price:", price_limit, "usdc(2dp):", usdc_amount, "shares(4dp):", desired_shares)
+                print("tokenid, price, size, side", token_id, price_limit, usdc_amount, side)
+
+                mo = MarketOrderArgs(
+                    token_id=token_id,
+                    amount=float(usdc_amount),     # dollars (2dp)
+                    side="BUY",
+                    price=float(price_limit),      # optional price cap
+                )
+            else:
+                print("SELL price:", price_limit, "shares(4dp):", desired_shares)
+                print("tokenid, price, size, side", token_id, price_limit, desired_shares, side)
+
+                mo = MarketOrderArgs(
+                    token_id=token_id,
+                    amount=float(desired_shares),  # shares (4dp)
+                    side="SELL",
+                    price=float(price_limit),      # optional price floor-ish cap
+                )
+
+            signed = self.client.create_market_order(mo)
+            try:
+                resp = self.client.post_order(signed, OrderType.FAK)
+            except PolyApiException as e:
+                # normalize message
+                msg = ""
+                try:
+                    if getattr(e, "error_msg", None):
+                        msg = str(e.error_msg.get("error", "")).lower()
+                except Exception:
+                    msg = str(e).lower()
+
+                if "not enough balance" in msg or "insufficient balance" in msg:
+                    print(f"Skipping trade: insufficient balance for {slug}, computing max affordable...")
+
+                    bal = self.get_available_balance(token_id, side)
+
+                    if side == "BUY":
+                        # bal is USDC => compute max shares at the current price cap
+                        affordable_usdc = q_step(bal, USDC_STEP)
+                        affordable_shares = q_step(affordable_usdc / price_limit, SHARES_STEP)
+                        if affordable_shares <= 0:
+                            print("Skipping trade: affordable shares too small.")
+                            return None, None
+                        trade_change["actual_size"] = str(affordable_shares)
+                    else:
+                        # bal is shares
+                        affordable_shares = q_step(bal, SHARES_STEP)
+                        if affordable_shares <= 0:
+                            print("Skipping trade: share balance too small.")
+                            return None, None
+                        trade_change["actual_size"] = str(affordable_shares)
+
+                    # retry once
+                    return self.execute_copy_trade(trade_change, multiplier=1.0, wallet=wallet)
+
+                raise
+
+            order_id = resp.get("orderID") or resp.get("orderId")
+            return True, order_id
+
+        except Exception as e:
+            print(f"Failed to execute copy trade: {e}")
+            return None, None
+
+    def check_orders(self):
+        return self.client.get_trades()
