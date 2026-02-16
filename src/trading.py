@@ -24,7 +24,8 @@ MAX_P = Decimal("0.999")
 
 USDC_STEP = Decimal("0.01")     # BUY market amount precision: 2dp
 SHARES_STEP = Decimal("0.0001") # SELL shares precision: 4dp (and taker constraint)
-
+SHARES_BASE = Decimal("1000000")
+USDC_BASE = Decimal("1000000")
 
 def q_step(x: Decimal, step: Decimal) -> Decimal:
     return (x / step).to_integral_value(rounding=ROUND_DOWN) * step
@@ -69,7 +70,7 @@ class TradingModule:
             raise ValueError(f"Could not read tick size from response: {data}")
         return Decimal(str(tick))
 
-    def get_available_balance(self, token_id: str, side: str) -> Decimal:
+    def get_available_balance(self, token_id: str, side: str, *, raw_units: bool = False) -> Decimal:
         side = side.upper()
         if side == "BUY":
             params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
@@ -79,9 +80,28 @@ class TradingModule:
             raise ValueError("side must be BUY or SELL")
 
         self.client.update_balance_allowance(params)
-        bal = self.client.get_balance_allowance(params)
-        return Decimal(str(bal["balance"]))
+        ba = self.client.get_balance_allowance(params)
 
+        bal = Decimal(str(ba.get("balance", "0")))
+
+        # try common allowance keys; if none exist, fall back to balance
+        allow_raw = (
+            ba.get("allowance")
+            or ba.get("approved")
+            or ba.get("spendAllowance")
+            or ba.get("available")
+        )
+        if allow_raw is None:
+            usable = bal
+        else:
+            allow = Decimal(str(allow_raw))
+            usable = min(bal, allow)
+        if side == "BUY" and not raw_units:
+            return usable / USDC_BASE
+        if side == "SELL" and not raw_units:
+            return usable / SHARES_BASE
+        return usable    
+    
     def get_orderbook(self, slug: str, outcome: str, condition_id: str) -> Tuple[Optional[str], Optional[Decimal]]:
         r = requests.get(
             "https://gamma-api.polymarket.com/markets",
@@ -117,7 +137,7 @@ class TradingModule:
         return token_id, selected_price
 
     # ---------- Main ----------
-    def execute_copy_trade(self, trade_change: Dict[str, Any], multiplier: float, wallet: str):
+    def execute_copy_trade(self, trade_change: Dict[str, Any], multiplier: float, wallet: str, _retried: bool = False):
         """
         - We treat sizing internally as SHARES.
         - For market orders:
@@ -208,14 +228,15 @@ class TradingModule:
                 try:
                     if getattr(e, "error_msg", None):
                         msg = str(e.error_msg.get("error", "")).lower()
+                    if getattr(e, "error_message", None):
+                        msg = str(e.error_message.get("error", "")).lower()
                 except Exception:
                     msg = str(e).lower()
-
-                if "not enough balance" in msg or "insufficient balance" in msg:
-                    print(f"Skipping trade: insufficient balance for {slug}, computing max affordable...")
+                if ("not enough balance" in msg or "insufficient balance" in msg):# and not _retried:
+                    print(f"Retrying trade: insufficient balance for {slug}, computing max affordable...")
 
                     bal = self.get_available_balance(token_id, side)
-
+                    print(f"Available balance for {side}: {bal} {'shares' if side == 'SELL' else 'USDC'}")
                     if side == "BUY":
                         # bal is USDC => compute max shares at the current price cap
                         affordable_usdc = q_step(bal, USDC_STEP)
@@ -233,8 +254,13 @@ class TradingModule:
                         trade_change["actual_size"] = str(affordable_shares)
 
                     # retry once
-                    return self.execute_copy_trade(trade_change, multiplier=1.0, wallet=wallet)
-
+                    return self.execute_copy_trade(trade_change, multiplier=1.0, wallet=wallet, _retried=True)
+                elif ("no orders found to match with fak order" in msg):
+                    print(f"Retrying trade: no liquidity at price for {slug}.")
+                    relaxed_by = Decimal("0.05")
+                    new_limit = self.relaxed_price_limit(ref_price, side, tick, relaxed_by)
+                    trade_change["price_limit"] = str(new_limit)
+                    return self.execute_copy_trade(trade_change, multiplier=1.0, wallet=wallet, _retried=True)
                 raise
 
             order_id = resp.get("orderID") or resp.get("orderId")
@@ -246,3 +272,10 @@ class TradingModule:
 
     def check_orders(self):
         return self.client.get_trades()
+
+    def relaxed_price_limit(self, ref_price: Decimal, side: str, tick: Decimal, relax_by: Decimal) -> Decimal:
+        if side == "BUY":
+            raw = ref_price + relax_by
+        else:
+            raw = ref_price - relax_by
+        return q_step(clamp(raw, MIN_P, MAX_P), tick)

@@ -8,6 +8,7 @@ import asyncio
 from tqdm.contrib.logging import logging_redirect_tqdm
 from tqdm import tqdm
 
+
 # Ensure we can import from src
 sys.path.append(os.getcwd())
 
@@ -21,6 +22,8 @@ logging.basicConfig(
     datefmt='%H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 CONFIG_FILE = "config.json"
 
