@@ -37,7 +37,7 @@ async def main():
     rate_limit = config.get("rate_limit", 25)
     account_budget = config.get("account_budget_dollars", 1)
     semaphore = asyncio.Semaphore(rate_limit)
-    
+    trade_semaphore = asyncio.Semaphore(config.get("max_concurrent_trades", 5))
     if not wallets:
         logger.error("No wallets to track in config.")
         return
@@ -88,18 +88,37 @@ async def main():
                     previous_positions = wallet_states.get(wallet, [])
                     logger.debug(f"{wallet[:8]} prev={len(previous_positions)} curr={len(current_positions)}")
                     changes = detect_order_changes(previous_positions, current_positions)
+
                     if changes:
                         logger.info(f"Detected {len(changes)} changes for {wallet[:8]}")
+
                         total_initial_value = sum(pos.get('initialValue', 0) for pos in current_positions) or 0
                         if total_initial_value == 0:
                             logger.warning("Total initial value is 0, skipping multiplier-based sizing")
                         else:
                             multiplier = account_budget / total_initial_value
-                            for change in changes:
-                                success, order_id = trading_module.execute_copy_trade(change, multiplier, wallet)
-                                if success: logger.info(f"Success! Order ID: {order_id}")
+
+                            async def run_one_change(change):
+                                async with trade_semaphore:
+                                    try:
+                                        # execute_copy_trade is sync -> run in a thread
+                                        success, order_id = await asyncio.to_thread(
+                                            trading_module.execute_copy_trade,
+                                            change, multiplier, wallet
+                                        )
+                                        if success:
+                                            logger.info(f"Success! Order ID: {order_id}")
+                                        return success, order_id
+                                    except Exception as e:
+                                        logger.error(f"Trade error for {wallet[:8]}: {e}")
+                                        return False, None
+
+                            # run all changes concurrently (bounded by trade_semaphore)
+                            await asyncio.gather(*(run_one_change(c) for c in changes))
+
                     else:
                         logger.debug("No changes found")
+
                     wallet_states[wallet] = current_positions
                 else:
                     logger.error(f"No current positions for wallet {wallet}")
