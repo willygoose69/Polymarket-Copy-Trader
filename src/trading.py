@@ -27,6 +27,8 @@ SHARES_STEP = Decimal("0.0001") # SELL shares precision: 4dp (and taker constrai
 SHARES_BASE = Decimal("1000000")
 USDC_BASE = Decimal("1000000")
 
+MAX_LIQ_RETRIES = 6
+
 def q_step(x: Decimal, step: Decimal) -> Decimal:
     return (x / step).to_integral_value(rounding=ROUND_DOWN) * step
 
@@ -191,54 +193,53 @@ class TradingModule:
             tick = self.get_tick_size(token_id)
 
             # marketable price limit
-            raw_price = (ref_price + Decimal("0.01")) if side == "BUY" else (ref_price - Decimal("0.01"))
-            price_limit = q_step(clamp(raw_price, MIN_P, MAX_P), tick)
+            if "price_limit" in trade_change:
+                price_limit = q_step(clamp(Decimal(str(trade_change["price_limit"])), MIN_P, MAX_P), tick)
+            else:
+                raw_price = (ref_price + Decimal("0.01")) if side == "BUY" else (ref_price - Decimal("0.01"))
+                price_limit = q_step(clamp(raw_price, MIN_P, MAX_P), tick)
 
             # --- MARKET ORDER (FAK) ---
             # FAK is defined as: BUY in dollars, SELL in shares. :contentReference[oaicite:2]{index=2}
             if side == "BUY":
                 usdc_amount = q_step(desired_shares * price_limit, USDC_STEP)
-
                 print("BUY price:", price_limit, "usdc(2dp):", usdc_amount, "shares(4dp):", desired_shares)
                 print("tokenid, price, size, side", token_id, price_limit, usdc_amount, side)
-
                 mo = MarketOrderArgs(
                     token_id=token_id,
-                    amount=float(usdc_amount),     # dollars (2dp)
+                    amount=float(usdc_amount),
                     side="BUY",
-                    price=float(price_limit),      # optional price cap
+                    price=float(price_limit),
                 )
             else:
                 print("SELL price:", price_limit, "shares(4dp):", desired_shares)
                 print("tokenid, price, size, side", token_id, price_limit, desired_shares, side)
-
                 mo = MarketOrderArgs(
                     token_id=token_id,
-                    amount=float(desired_shares),  # shares (4dp)
+                    amount=float(desired_shares),
                     side="SELL",
-                    price=float(price_limit),      # optional price floor-ish cap
+                    price=float(price_limit),
                 )
 
             signed = self.client.create_market_order(mo)
             try:
                 resp = self.client.post_order(signed, OrderType.FAK)
             except PolyApiException as e:
-                # normalize message
                 msg = ""
                 try:
                     if getattr(e, "error_msg", None):
                         msg = str(e.error_msg.get("error", "")).lower()
-                    if getattr(e, "error_message", None):
+                    elif getattr(e, "error_message", None):
                         msg = str(e.error_message.get("error", "")).lower()
                 except Exception:
                     msg = str(e).lower()
-                if ("not enough balance" in msg or "insufficient balance" in msg):# and not _retried:
-                    print(f"Retrying trade: insufficient balance for {slug}, computing max affordable...")
 
+                if ("not enough balance" in msg or "insufficient balance" in msg):
+                    print(f"Retrying trade: insufficient balance for {slug}, computing max affordable...")
                     bal = self.get_available_balance(token_id, side)
                     print(f"Available balance for {side}: {bal} {'shares' if side == 'SELL' else 'USDC'}")
+
                     if side == "BUY":
-                        # bal is USDC => compute max shares at the current price cap
                         affordable_usdc = q_step(bal, USDC_STEP)
                         affordable_shares = q_step(affordable_usdc / price_limit, SHARES_STEP)
                         if affordable_shares <= 0:
@@ -246,21 +247,37 @@ class TradingModule:
                             return None, None
                         trade_change["actual_size"] = str(affordable_shares)
                     else:
-                        # bal is shares
                         affordable_shares = q_step(bal, SHARES_STEP)
                         if affordable_shares <= 0:
                             print("Skipping trade: share balance too small.")
                             return None, None
                         trade_change["actual_size"] = str(affordable_shares)
 
-                    # retry once
-                    return self.execute_copy_trade(trade_change, multiplier=1.0, wallet=wallet, _retried=True)
-                elif ("no orders found to match with fak order" in msg):
-                    print(f"Retrying trade: no liquidity at price for {slug}.")
-                    relaxed_by = Decimal("0.05")
-                    new_limit = self.relaxed_price_limit(ref_price, side, tick, relaxed_by)
+                    # retry once (balance)
+                    trade_change.pop("price_limit", None)
+                    return self.execute_copy_trade(trade_change, multiplier=1.0, wallet=wallet)
+
+                if ("no orders found to match with fak order" in msg):
+                    # ---- cap retries + widen progressively ----
+                    n = int(trade_change.get("liq_retries", 0))
+                    if n >= MAX_LIQ_RETRIES:
+                        print(f"Skipping trade: still no liquidity after {n} retries for {slug}.")
+                        return None, None
+
+                    trade_change["liq_retries"] = n + 1
+
+                    # widen more each time (BUY: higher cap, SELL: lower min)
+                    step = Decimal("0.02")  # 2c per attempt
+                    relax_by = step * Decimal(n + 1)
+
+                    new_limit = self.relaxed_price_limit(ref_price, side, tick, relax_by)
                     trade_change["price_limit"] = str(new_limit)
-                    return self.execute_copy_trade(trade_change, multiplier=1.0, wallet=wallet, _retried=True)
+
+                    print(f"Retrying trade: no liquidity at price. Attempt {n+1}/{MAX_LIQ_RETRIES}, "
+                        f"new price_limit={new_limit} (relax_by={relax_by}).")
+
+                    return self.execute_copy_trade(trade_change, multiplier=1.0, wallet=wallet)
+
                 raise
 
             order_id = resp.get("orderID") or resp.get("orderId")
